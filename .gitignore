@@ -1,0 +1,5 @@
+/.idea*
+/builds/coverage/*
+!/builds/coverage/.gitkeep
+
+*.DS_Store*

@@ -1,0 +1,5 @@
+GO ?= go
+GO_TEST_FLAGS ?= -count=1
+COVERAGE_DIR ?= builds/coverage
+COVERAGE_PROFILE ?= $(COVERAGE_DIR)/coverage.out
+COVERAGE_HTML ?= $(COVERAGE_DIR)/coverage.html
