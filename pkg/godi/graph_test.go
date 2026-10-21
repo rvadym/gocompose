@@ -1,38 +1,41 @@
-package godicb
+package godi
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rvadym/gocompose/pkg/internal/testfs"
 )
 
 func TestBuildDependencyGraphResolvesProvidersAndReportsMissingInterfaces(t *testing.T) {
-	root := t.TempDir()
-	writeGraphFile(t, root, "go.mod", "module example.com/project\n\ngo 1.26\n")
-	writeGraphFile(t, root, "app/contracts/contracts.go", `package contracts
+	root := virtualPath(t, "graph-project")
+	fileSystem := testfs.Map{Files: map[string]string{
+		filepath.Join(root, "go.mod"): "module example.com/project\n\ngo 1.26\n",
+		filepath.Join(root, "app/contracts/contracts.go"): `package contracts
 type Reader interface { Read() }
 type Writer interface { Write() }
 type Missing interface { Missing() }
-`)
-	writeGraphFile(t, root, "app/consumer/consumer.go", `package consumer
+`,
+		filepath.Join(root, "app/consumer/consumer.go"): `package consumer
 import "example.com/project/app/contracts"
 //di:wire
 func New(reader contracts.Reader, writer contracts.Writer, missing contracts.Missing, limit int) *Service {
 	return nil
 }
 type Service struct{}
-`)
-	writeGraphFile(t, root, "adapters/reader.go", `package adapters
+`,
+		filepath.Join(root, "adapters/reader.go"): `package adapters
 //di:Reader
 //di:Writer
 func NewReader() *Reader { return nil }
 type Reader struct{}
 func (*Reader) Read() {}
 func (*Reader) Write() {}
-`)
+`,
+	}}
 
-	graph, err := BuildDependencyGraph(ScanOptions{Root: root})
+	graph, err := NewRunner(fileSystem).BuildDependencyGraph(ScanOptions{Root: root})
 	if err != nil {
 		t.Fatalf("BuildDependencyGraph() error = %v", err)
 	}
@@ -71,39 +74,30 @@ func (*Reader) Write() {}
 }
 
 func TestBuildDependencyGraphRejectsAmbiguousShortInterfaceTag(t *testing.T) {
-	root := t.TempDir()
-	writeGraphFile(t, root, "go.mod", "module example.com/project\n\ngo 1.26\n")
-	writeGraphFile(t, root, "contracts/one/contract.go", "package one\ntype Reader interface { ReadOne() }\n")
-	writeGraphFile(t, root, "contracts/two/contract.go", "package two\ntype Reader interface { ReadTwo() }\n")
-	writeGraphFile(t, root, "consumer/consumer.go", `package consumer
+	root := virtualPath(t, "graph-ambiguous")
+	fileSystem := testfs.Map{Files: map[string]string{
+		filepath.Join(root, "go.mod"):                    "module example.com/project\n\ngo 1.26\n",
+		filepath.Join(root, "contracts/one/contract.go"): "package one\ntype Reader interface { ReadOne() }\n",
+		filepath.Join(root, "contracts/two/contract.go"): "package two\ntype Reader interface { ReadTwo() }\n",
+		filepath.Join(root, "consumer/consumer.go"): `package consumer
 import (
 	"example.com/project/contracts/one"
 	"example.com/project/contracts/two"
 )
 //di:wire
 func New(one one.Reader, two two.Reader) {}
-`)
-	writeGraphFile(t, root, "adapters/reader.go", `package adapters
+`,
+		filepath.Join(root, "adapters/reader.go"): `package adapters
 //di:Reader
 func NewReader() *Reader { return nil }
 type Reader struct{}
 func (*Reader) ReadOne() {}
 func (*Reader) ReadTwo() {}
-`)
+`,
+	}}
 
-	_, err := BuildDependencyGraph(ScanOptions{Root: root})
+	_, err := NewRunner(fileSystem).BuildDependencyGraph(ScanOptions{Root: root})
 	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("BuildDependencyGraph() error = %v, want ambiguous short interface tag", err)
-	}
-}
-
-func writeGraphFile(t *testing.T, root, name, content string) {
-	t.Helper()
-	path := filepath.Join(root, name)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
 	}
 }

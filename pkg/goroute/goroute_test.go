@@ -1,45 +1,30 @@
 package goroute
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rvadym/gocompose/pkg/internal/fs"
+	"github.com/rvadym/gocompose/pkg/internal/testfs"
 )
 
-func write(t *testing.T, root, name, content string) {
-	t.Helper()
-	path := filepath.Join(root, name)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func project(t *testing.T, handlers map[string]string) (root string) {
-	t.Helper()
-	root = t.TempDir()
-	write(t, root, "go.mod", "module example.com/project\n\ngo 1.21\n")
-	write(t, root, "app/adapters/composition/container.go", "package composition\n\ntype Container struct{}\n")
-	for dir, src := range handlers {
-		write(t, root, "app/adapters/server/"+dir+"/handler.go", src)
-	}
-	return root
-}
-
-func TestGenerateMapsRoutesToContainerFields(t *testing.T) {
-	root := project(t, map[string]string{
+func TestBuildSourceMapsRoutesToContainerFields(t *testing.T) {
+	root := virtualRoutePath(t, "route-project")
+	outputDir := filepath.Join(root, "app/adapters/composition")
+	fileSystem := routeProject(root, map[string]string{
 		"api_index": "package api_index\n\n//router:get /index/:message\n//\n//di:wire\nfunc New() int { return 0 }\n",
 		"api_ping":  "package api_ping\n\n// router:get /ping\n//router:post /ping\n//di:wire\nfunc New() int { return 0 }\n",
 	})
-	out, err := Generate(Options{Root: filepath.Join(root, "app"), OutputDir: filepath.Join(root, "app/adapters/composition")})
+	generator := NewGenerator(fileSystem)
+	source, outPath, err := generator.Render(Options{Root: filepath.Join(root, "app"), OutputDir: outputDir})
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, _ := os.ReadFile(out)
-	src := string(data)
+	if want := filepath.Join(outputDir, outputFile); outPath != want {
+		t.Fatalf("buildSource() path = %q, want %q", outPath, want)
+	}
+	src := string(source)
 	for _, want := range []string{
 		"package composition",
 		`"example.com/project/internal/pkg/infra"`,
@@ -92,8 +77,9 @@ func TestScanErrors(t *testing.T) {
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			root := project(t, tc.handlers)
-			_, err := Scan(filepath.Join(root, "app"))
+			root := virtualRoutePath(t, "route-error-"+name)
+			fileSystem := routeProject(root, tc.handlers)
+			_, err := NewGenerator(fileSystem).Scan(filepath.Join(root, "app"))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Scan() error = %v, want %q", err, tc.want)
 			}
@@ -102,11 +88,12 @@ func TestScanErrors(t *testing.T) {
 }
 
 func TestScanAllowsSamePathWithDifferentMethods(t *testing.T) {
-	root := project(t, map[string]string{
+	root := virtualRoutePath(t, "route-methods")
+	fileSystem := routeProject(root, map[string]string{
 		"api_get":  "package api_get\n//router:get /items\n//di:wire\nfunc New() int { return 0 }\n",
 		"api_post": "package api_post\n//router:post /items\n//di:wire\nfunc New() int { return 0 }\n",
 	})
-	routes, err := Scan(filepath.Join(root, "app"))
+	routes, err := NewGenerator(fileSystem).Scan(filepath.Join(root, "app"))
 	if err != nil {
 		t.Fatalf("Scan() error = %v", err)
 	}
@@ -118,16 +105,13 @@ func TestScanAllowsSamePathWithDifferentMethods(t *testing.T) {
 	}
 }
 
-func TestGenerateWithoutRoutesWritesEmptyRoutes(t *testing.T) {
-	root := project(t, nil)
-	stale := filepath.Join(root, "app/adapters/composition/router.go")
-	write(t, root, "app/adapters/composition/router.go", generatedMark+"\n\npackage composition\n// stale generated content\n")
-
-	out, err := Generate(Options{Root: filepath.Join(root, "app"), OutputDir: filepath.Dir(stale)})
-	if err != nil || out != stale {
-		t.Fatalf("Generate() = %q, %v; want %q", out, err, stale)
-	}
-	data, err := os.ReadFile(stale)
+func TestBuildSourceWithoutRoutesProducesEmptyRoutes(t *testing.T) {
+	root := virtualRoutePath(t, "route-empty")
+	fileSystem := routeProject(root, nil)
+	source, _, err := NewGenerator(fileSystem).Render(Options{
+		Root:      filepath.Join(root, "app"),
+		OutputDir: filepath.Join(root, "app/adapters/composition"),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,11 +120,28 @@ func TestGenerateWithoutRoutesWritesEmptyRoutes(t *testing.T) {
 		"routes := make(infra.HandlersConfigs, 0, 0)",
 		"return routes, nil",
 	} {
-		if !strings.Contains(string(data), want) {
-			t.Errorf("generated empty routes missing %q:\n%s", want, data)
+		if !strings.Contains(string(source), want) {
+			t.Errorf("generated empty routes missing %q:\n%s", want, source)
 		}
 	}
-	if strings.Contains(string(data), "stale generated content") {
-		t.Fatal("stale generated content remains")
+}
+
+func virtualRoutePath(t *testing.T, name string) string {
+	t.Helper()
+	root, err := filepath.Abs(name)
+	if err != nil {
+		t.Fatal(err)
 	}
+	return root
+}
+
+func routeProject(root string, handlers map[string]string) fs.FileSystem {
+	files := map[string]string{
+		filepath.Join(root, "go.mod"):                                "module example.com/project\n\ngo 1.21\n",
+		filepath.Join(root, "app/adapters/composition/container.go"): "package composition\n\ntype Container struct{}\n",
+	}
+	for dir, source := range handlers {
+		files[filepath.Join(root, "app/adapters/server", dir, "handler.go")] = source
+	}
+	return testfs.Map{Files: files}
 }

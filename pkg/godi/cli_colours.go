@@ -1,4 +1,4 @@
-package godicb
+package godi
 
 const (
 	Reset = "\033[0m"

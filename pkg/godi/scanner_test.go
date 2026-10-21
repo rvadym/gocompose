@@ -1,16 +1,19 @@
-package godicb
+package godi
 
 import (
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/rvadym/gocompose/pkg/internal/testfs"
 )
 
 func TestScanFindsMultipleDirectivesOnFunction(t *testing.T) {
-	root := t.TempDir()
-	writeGoFile(t, root, "wire.go", `package sample
+	root := virtualPath(t, "scan-project")
+	file := filepath.Join(root, "wire.go")
+	fileSystem := testfs.Map{Files: map[string]string{
+		file: `package sample
 
 import (
 	"context"
@@ -28,9 +31,10 @@ func DocumentedHelper() {}
 
 // This is prose, not a directive: //di:Ignored
 var example = "//di:AlsoIgnored"
-`)
+`,
+	}}
 
-	directives, err := Scan(ScanOptions{Root: root})
+	directives, err := NewRunner(fileSystem).Scan(ScanOptions{Root: root})
 	if err != nil {
 		t.Fatalf("Scan() error = %v", err)
 	}
@@ -40,7 +44,7 @@ var example = "//di:AlsoIgnored"
 
 	got := []Directive{
 		{
-			File: filepath.Join(root, "wire.go"), Line: 10, Kind: FunctionDeclaration, Name: "NewService", Value: "wire",
+			File: file, Line: 10, Kind: FunctionDeclaration, Name: "NewService", Value: "wire",
 			Parameters: []Parameter{
 				{Name: "ctx", Type: "context.Context"},
 				{Name: "cancel", Type: "context.Context"},
@@ -50,7 +54,7 @@ var example = "//di:AlsoIgnored"
 			Results: []string{"*Service"},
 		},
 		{
-			File: filepath.Join(root, "wire.go"), Line: 11, Kind: FunctionDeclaration, Name: "NewService", Value: "example.com/project/contracts.Service@dev",
+			File: file, Line: 11, Kind: FunctionDeclaration, Name: "NewService", Value: "example.com/project/contracts.Service@dev",
 			Parameters: []Parameter{
 				{Name: "ctx", Type: "context.Context"},
 				{Name: "cancel", Type: "context.Context"},
@@ -66,14 +70,16 @@ var example = "//di:AlsoIgnored"
 }
 
 func TestScanIncludesExtraDirectoriesAndTrees(t *testing.T) {
-	root := t.TempDir()
-	withDir := filepath.Join(t.TempDir(), "single")
-	withTree := filepath.Join(t.TempDir(), "nested")
-	writeGoFile(t, root, "root.go", "package root\n//di:wire\nfunc Root() {}")
-	writeGoFile(t, withDir, "extra.go", "package extra\n//di:example.com/contracts.Reader\nfunc NewReader() {}")
-	writeGoFile(t, filepath.Join(withTree, "child"), "tree.go", "package child\n//di:example.com/contracts.Writer\nfunc NewWriter() {}")
+	root := virtualPath(t, "scan-root")
+	withDir := virtualPath(t, "scan-extra")
+	withTree := virtualPath(t, "scan-tree")
+	fileSystem := testfs.Map{Files: map[string]string{
+		filepath.Join(root, "root.go"):              "package root\n//di:wire\nfunc Root() {}",
+		filepath.Join(withDir, "extra.go"):          "package extra\n//di:example.com/contracts.Reader\nfunc NewReader() {}",
+		filepath.Join(withTree, "child", "tree.go"): "package child\n//di:example.com/contracts.Writer\nfunc NewWriter() {}",
+	}}
 
-	directives, err := Scan(ScanOptions{
+	directives, err := NewRunner(fileSystem).Scan(ScanOptions{
 		Root:      root,
 		WithDirs:  []string{withDir},
 		WithTrees: []string{withTree},
@@ -92,42 +98,48 @@ func TestScanIncludesExtraDirectoriesAndTrees(t *testing.T) {
 }
 
 func TestScanRejectsMalformedDirective(t *testing.T) {
-	root := t.TempDir()
-	writeGoFile(t, root, "bad.go", "package sample\n//di\nfunc NewService() {}")
+	root := virtualPath(t, "scan-malformed")
+	fileSystem := testfs.Map{Files: map[string]string{
+		filepath.Join(root, "bad.go"): "package sample\n//di\nfunc NewService() {}",
+	}}
 
-	_, err := Scan(ScanOptions{Root: root})
+	_, err := NewRunner(fileSystem).Scan(ScanOptions{Root: root})
 	if err == nil || !strings.Contains(err.Error(), "malformed directive") {
 		t.Fatalf("Scan() error = %v, want malformed directive error", err)
 	}
 }
 
 func TestScanRejectsTypeLevelDirective(t *testing.T) {
-	root := t.TempDir()
-	writeGoFile(t, root, "bad.go", "package sample\n//di:example.com/project/contracts.Reader\ntype Reader struct{}")
+	root := virtualPath(t, "scan-type-level")
+	fileSystem := testfs.Map{Files: map[string]string{
+		filepath.Join(root, "bad.go"): "package sample\n//di:example.com/project/contracts.Reader\ntype Reader struct{}",
+	}}
 
-	_, err := Scan(ScanOptions{Root: root})
+	_, err := NewRunner(fileSystem).Scan(ScanOptions{Root: root})
 	if err == nil || !strings.Contains(err.Error(), "only annotate constructor/factory functions") {
 		t.Fatalf("Scan() error = %v, want function-only directive error", err)
 	}
 }
 
 func TestScanRejectsMissingOrEmptyInputDirectories(t *testing.T) {
-	root := t.TempDir()
-	writeGoFile(t, root, "root.go", "package root")
-	empty := t.TempDir()
+	root := virtualPath(t, "scan-empty-with-dir")
+	empty := filepath.Join(root, "empty")
+	fileSystem := testfs.Map{
+		Files: map[string]string{filepath.Join(root, "root.go"): "package root"},
+		Dirs:  []string{empty},
+	}
 
-	_, err := Scan(ScanOptions{Root: root, WithDirs: []string{empty}})
+	_, err := NewRunner(fileSystem).Scan(ScanOptions{Root: root, WithDirs: []string{empty}})
 	if err == nil || !strings.Contains(err.Error(), "contains no Go files") {
 		t.Fatalf("Scan() error = %v, want no Go files error", err)
 	}
 }
 
-func writeGoFile(t *testing.T, dir, name, content string) {
+func virtualPath(t *testing.T, name string) string {
 	t.Helper()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	path, err := filepath.Abs(name)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	return path
 }

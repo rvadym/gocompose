@@ -3,12 +3,12 @@ include Makefile.dist.val
 
 .DEFAULT_GOAL := help
 
-.PHONY: help lint test test-cover mod-sync verify
+.PHONY: help lint test test-cover mod-sync verify build install
 
 help: ## Show available make targets
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z0-9_.-]+:.*##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-# Go -------------------------------------------------------------------------
+# Test -------------------------------------------------------------------------
 
 lint: ## Run go vet and other linters
 	$(GO) vet ./...
@@ -27,3 +27,25 @@ mod-sync: ## Download, tidy, and vendor Go modules
 	$(GO) mod vendor
 
 verify: mod-sync lint test ## Run tests
+
+# Build ------------------------------------------------------------------------
+
+GOOS ?= $(shell go env GOOS)
+BINARY := gocompose$(if $(filter windows,$(GOOS)),.exe,)
+
+VERSION      := $(shell git describe --tags --always --dirty)
+GIT_COMMIT   := $(shell git rev-parse --short HEAD)
+BUILD_DATE   := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+MODULE       := $(shell go list -m)
+INSTALL_DIR  := $(shell go env GOPATH)/bin
+
+build: ## Build executable and place it locally
+	$(GO) build -ldflags "\
+      -X $(MODULE)/cmd.Version=$(VERSION) \
+      -X $(MODULE)/cmd.GitCommit=$(GIT_COMMIT) \
+      -X $(MODULE)/cmd.BuildDate=$(BUILD_DATE)" \
+      -o $(BINARY) .
+
+install: ## Build an executable and install it to the user's GOPATH bin directory
+	$(MAKE) build
+	install -m 755 ./$(BINARY) "$(INSTALL_DIR)/$(BINARY)"

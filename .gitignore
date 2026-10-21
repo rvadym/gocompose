@@ -1,5 +1,7 @@
 /.idea*
 /builds/coverage/*
 !/builds/coverage/.gitkeep
+/vendor*
+/gocompose*
 
 *.DS_Store*
