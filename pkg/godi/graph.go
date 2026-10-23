@@ -1,4 +1,4 @@
-package godicb
+package godi
 
 import (
 	"bytes"
@@ -7,17 +7,19 @@ import (
 	"go/format"
 	"go/parser"
 	"go/token"
-	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/rvadym/gocompose/pkg/internal/fs"
+	"github.com/rvadym/gocompose/pkg/internal/module"
 )
 
 // DependencyGraph is a constructor dependency graph and its unresolved
 // interface dependencies. It is produced by a single parse+resolve pass
 // over a scan root (see resolve) and is the shared input to both the
 // human-readable CLI report (FormatScanOutputCLI) and Go source generation
-// (GenerateContainer) -- godicb never scans the same scan root twice to
+// (GenerateContainer) -- godi never scans the same scan root twice to
 // serve those two outputs.
 type DependencyGraph struct {
 	Nodes      []GraphNode
@@ -216,7 +218,11 @@ type resolvedGraph struct {
 // GenerateContainer to render Go source from the same resolution without
 // scanning again.
 func BuildDependencyGraph(options ScanOptions) (DependencyGraph, error) {
-	rg, err := resolve(options)
+	return buildDependencyGraph(options, fs.Default())
+}
+
+func buildDependencyGraph(options ScanOptions, fileSystem fs.FileSystem) (DependencyGraph, error) {
+	rg, err := resolve(options, fileSystem)
 	if err != nil {
 		return DependencyGraph{}, err
 	}
@@ -228,20 +234,20 @@ func BuildDependencyGraph(options ScanOptions) (DependencyGraph, error) {
 // fidelity, and resolves every //di:wire parameter to either a uniquely
 // tagged provider, another tagged node (concrete-to-concrete wiring), or
 // "no unique match" (recorded, not failed -- see resolvedParam.reason).
-func resolve(options ScanOptions) (*resolvedGraph, error) {
+func resolve(options ScanOptions, fileSystem fs.FileSystem) (*resolvedGraph, error) {
 	root := options.Root
 	if root == "" {
 		root = "."
 	}
-	rootAbs, err := absoluteDirectory(root)
+	rootAbs, err := absoluteDirectory(root, fileSystem)
 	if err != nil {
 		return nil, fmt.Errorf("scan root: %w", err)
 	}
-	files, err := inputGoFiles(options)
+	files, err := inputGoFiles(options, fileSystem)
 	if err != nil {
 		return nil, err
 	}
-	moduleRoot, modulePath, err := findModule(rootAbs)
+	moduleRoot, modulePath, err := module.NewFinder(fileSystem).FindModule(rootAbs)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +258,11 @@ func resolve(options ScanOptions) (*resolvedGraph, error) {
 	interfaceNames := make(map[string][]string)
 
 	for _, filename := range files {
-		file, err := parser.ParseFile(fset, filename, nil, parser.ParseComments|parser.AllErrors)
+		source, err := fileSystem.ReadFile(filename)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", filename, err)
+		}
+		file, err := parser.ParseFile(fset, filename, source, parser.ParseComments|parser.AllErrors)
 		if err != nil {
 			return nil, fmt.Errorf("parse %s: %w", filename, err)
 		}
@@ -561,34 +571,34 @@ func resolveInterfaceTag(tag string, names map[string][]string) (string, error) 
 	}
 }
 
-func inputGoFiles(options ScanOptions) ([]string, error) {
+func inputGoFiles(options ScanOptions, fileSystem fs.FileSystem) ([]string, error) {
 	root := options.Root
 	if root == "" {
 		root = "."
 	}
-	root, err := absoluteDirectory(root)
+	root, err := absoluteDirectory(root, fileSystem)
 	if err != nil {
 		return nil, fmt.Errorf("scan root: %w", err)
 	}
 	var files []string
-	if err := appendTreeFiles(root, &files); err != nil {
+	if err := appendTreeFiles(root, &files, fileSystem); err != nil {
 		return nil, err
 	}
 	for _, path := range options.WithDirs {
-		dir, err := absoluteDirectory(path)
+		dir, err := absoluteDirectory(path, fileSystem)
 		if err != nil {
 			return nil, fmt.Errorf("--with-dir=%s: %w", path, err)
 		}
-		if err := collectDirectory(dir, &files); err != nil {
+		if err := collectDirectory(dir, &files, fileSystem); err != nil {
 			return nil, fmt.Errorf("--with-dir=%s: %w", path, err)
 		}
 	}
 	for _, path := range options.WithTrees {
-		dir, err := absoluteDirectory(path)
+		dir, err := absoluteDirectory(path, fileSystem)
 		if err != nil {
 			return nil, fmt.Errorf("--with-tree=%s: %w", path, err)
 		}
-		if err := appendTreeFiles(dir, &files); err != nil {
+		if err := appendTreeFiles(dir, &files, fileSystem); err != nil {
 			return nil, fmt.Errorf("--with-tree=%s: %w", path, err)
 		}
 	}
@@ -596,20 +606,31 @@ func inputGoFiles(options ScanOptions) ([]string, error) {
 	return uniqueStrings(files), nil
 }
 
-func appendTreeFiles(root string, files *[]string) error {
+func appendTreeFiles(root string, files *[]string, fileSystem fs.FileSystem) error {
 	foundGoFile := false
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+	var walk func(string) error
+	walk = func(dir string) error {
+		entries, err := fileSystem.ReadDir(dir)
+		if err != nil {
+			return err
 		}
-		if entry.IsDir() || !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".go") {
-			return nil
+		for _, entry := range entries {
+			path := filepath.Join(dir, entry.Name())
+			if entry.IsDir() {
+				if err := walk(path); err != nil {
+					return err
+				}
+				continue
+			}
+			if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".go") {
+				continue
+			}
+			*files = append(*files, path)
+			foundGoFile = true
 		}
-		*files = append(*files, path)
-		foundGoFile = true
 		return nil
-	})
-	if err != nil {
+	}
+	if err := walk(root); err != nil {
 		return fmt.Errorf("walk %s: %w", root, err)
 	}
 	if !foundGoFile {

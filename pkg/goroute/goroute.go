@@ -11,6 +11,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/rvadym/gocompose/pkg/internal/fs"
+	"github.com/rvadym/gocompose/pkg/internal/module"
 )
 
 const (
@@ -40,26 +43,53 @@ type Options struct {
 	HandlerImport string
 }
 
+// Generator holds the filesystem dependency used throughout route generation.
+type Generator struct {
+	fileSystem fs.FileSystem
+}
+
+// NewGenerator creates a route generator bound to fileSystem.
+func NewGenerator(fileSystem fs.FileSystem) *Generator {
+	return &Generator{fileSystem: fileSystem}
+}
+
 // Scan returns the routes declared under root, sorted by path.
 func Scan(root string) ([]Route, error) {
+	return scan(root, fs.Default())
+}
+
+// Scan returns the routes declared under root, sorted by path.
+func (g *Generator) Scan(root string) ([]Route, error) {
+	return scan(root, g.fileSystem)
+}
+
+func scan(root string, fileSystem fs.FileSystem) ([]Route, error) {
 	var files []string
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	var walk func(string) error
+	walk = func(dir string) error {
+		entries, err := fileSystem.ReadDir(dir)
 		if err != nil {
 			return err
 		}
-		name := d.Name()
-		if d.IsDir() {
-			if name == "testdata" || name == "vendor" || strings.HasPrefix(name, ".") {
-				return filepath.SkipDir
+		for _, entry := range entries {
+			name := entry.Name()
+			path := filepath.Join(dir, name)
+			if entry.IsDir() {
+				if name == "testdata" || name == "vendor" || strings.HasPrefix(name, ".") {
+					continue
+				}
+				if err := walk(path); err != nil {
+					return err
+				}
+				continue
 			}
-			return nil
-		}
-		if strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, "_test.go") {
-			files = append(files, path)
+			if strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, "_test.go") {
+				files = append(files, path)
+			}
 		}
 		return nil
-	})
-	if err != nil {
+	}
+	if err := walk(root); err != nil {
 		return nil, err
 	}
 	sort.Strings(files)
@@ -67,7 +97,11 @@ func Scan(root string) ([]Route, error) {
 	fset := token.NewFileSet()
 	var routes []Route
 	for _, filename := range files {
-		file, err := parser.ParseFile(fset, filename, nil, parser.ParseComments)
+		source, err := fileSystem.ReadFile(filename)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", filename, err)
+		}
+		file, err := parser.ParseFile(fset, filename, source, parser.ParseComments)
 		if err != nil {
 			return nil, err
 		}
@@ -113,10 +147,10 @@ func routesOf(fset *token.FileSet, fn *ast.FuncDecl, filename string) ([]Route, 
 		return nil, fmt.Errorf("%s: //router: must annotate a constructor function, not method %s", where, fn.Name.Name)
 	}
 	if !wired {
-		return nil, fmt.Errorf("%s: %s has //router: but no //di:wire, so godicb does not build it", where, fn.Name.Name)
+		return nil, fmt.Errorf("%s: %s has //router: but no //di:wire, so godi does not build it", where, fn.Name.Name)
 	}
 
-	// godicb names a root node's Container field after its package directory.
+	// godi names a root node's Container field after its package directory.
 	field := upperCamelFromSnake(filepath.Base(filepath.Dir(filename)))
 
 	routes := make([]Route, 0, len(patterns))
@@ -176,22 +210,7 @@ func validate(routes []Route) error {
 // It writes an empty GetRoutes implementation when no routes are annotated,
 // so callers can use the same API for every module.
 func Generate(options Options) (string, error) {
-	routes, err := Scan(options.Root)
-	if err != nil {
-		return "", err
-	}
-	outPath := filepath.Join(options.OutputDir, outputFile)
-
-	handlerImport := options.HandlerImport
-	if handlerImport == "" {
-		_, modulePath, err := findModule(options.Root)
-		if err != nil {
-			return "", err
-		}
-		handlerImport = modulePath + "/internal/pkg/infra"
-	}
-
-	source, err := render(routes, packageName(options.OutputDir), handlerImport)
+	source, outPath, err := buildSource(options, fs.Default())
 	if err != nil {
 		return "", err
 	}
@@ -199,6 +218,46 @@ func Generate(options Options) (string, error) {
 		return "", fmt.Errorf("write %s: %w", outPath, err)
 	}
 	return outPath, nil
+}
+
+// Generate writes the generated routes file using the generator's filesystem for inputs.
+func (g *Generator) Generate(options Options) (string, error) {
+	source, outPath, err := g.Render(options)
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(outPath, source, 0o644); err != nil {
+		return "", fmt.Errorf("write %s: %w", outPath, err)
+	}
+	return outPath, nil
+}
+
+// Render returns generated route source without writing it to disk.
+func (g *Generator) Render(options Options) ([]byte, string, error) {
+	return buildSource(options, g.fileSystem)
+}
+
+func buildSource(options Options, fileSystem fs.FileSystem) ([]byte, string, error) {
+	routes, err := scan(options.Root, fileSystem)
+	if err != nil {
+		return nil, "", err
+	}
+	outPath := filepath.Join(options.OutputDir, outputFile)
+
+	handlerImport := options.HandlerImport
+	if handlerImport == "" {
+		_, modulePath, err := module.NewFinder(fileSystem).FindModule(options.Root)
+		if err != nil {
+			return nil, "", err
+		}
+		handlerImport = modulePath + "/internal/pkg/infra"
+	}
+
+	source, err := render(routes, packageName(options.OutputDir, fileSystem), handlerImport)
+	if err != nil {
+		return nil, "", err
+	}
+	return source, outPath, nil
 }
 
 func render(routes []Route, pkg, handlerImport string) ([]byte, error) {
@@ -228,11 +287,19 @@ func render(routes []Route, pkg, handlerImport string) ([]byte, error) {
 	return out, nil
 }
 
-func packageName(dir string) string {
-	if files, err := filepath.Glob(filepath.Join(dir, "*.go")); err == nil {
+func packageName(dir string, fileSystem fs.FileSystem) string {
+	if files, err := fileSystem.ReadDir(dir); err == nil {
 		fset := token.NewFileSet()
 		for _, f := range files {
-			if file, err := parser.ParseFile(fset, f, nil, parser.PackageClauseOnly); err == nil {
+			if f.IsDir() || !strings.HasSuffix(f.Name(), ".go") {
+				continue
+			}
+			filename := filepath.Join(dir, f.Name())
+			source, err := fileSystem.ReadFile(filename)
+			if err != nil {
+				continue
+			}
+			if file, err := parser.ParseFile(fset, filename, source, parser.PackageClauseOnly); err == nil {
 				return file.Name.Name
 			}
 		}
@@ -246,26 +313,4 @@ func upperCamelFromSnake(s string) string {
 		b.WriteString(strings.ToUpper(part[:1]) + part[1:])
 	}
 	return b.String()
-}
-
-func findModule(start string) (string, string, error) {
-	current, err := filepath.Abs(start)
-	if err != nil {
-		return "", "", err
-	}
-	for {
-		if data, err := os.ReadFile(filepath.Join(current, "go.mod")); err == nil {
-			for _, line := range strings.Split(string(data), "\n") {
-				if f := strings.Fields(line); len(f) == 2 && f[0] == "module" {
-					return current, f[1], nil
-				}
-			}
-			return "", "", fmt.Errorf("%s/go.mod has no module directive", current)
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return "", "", fmt.Errorf("could not find go.mod above %s", start)
-		}
-		current = parent
-	}
 }

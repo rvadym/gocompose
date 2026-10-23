@@ -1,4 +1,4 @@
-package godicb
+package godi
 
 import (
 	"fmt"

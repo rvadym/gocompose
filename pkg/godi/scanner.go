@@ -1,4 +1,4 @@
-package godicb
+package godi
 
 import (
 	"bytes"
@@ -7,14 +7,15 @@ import (
 	"go/format"
 	"go/parser"
 	"go/token"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/rvadym/gocompose/pkg/internal/fs"
 )
 
-// ScanOptions defines the directories whose Go files are searched for godicb
+// ScanOptions defines the directories whose Go files are searched for godi
 // directives. Relative paths are resolved from the process working directory.
 type ScanOptions struct {
 	Root      string
@@ -49,7 +50,11 @@ const (
 // Scan parses Go files in the scan root and any explicitly included paths,
 // returning directives in deterministic file and source order.
 func Scan(options ScanOptions) ([]Directive, error) {
-	files, err := inputGoFiles(options)
+	return scan(options, fs.Default())
+}
+
+func scan(options ScanOptions, fileSystem fs.FileSystem) ([]Directive, error) {
+	files, err := inputGoFiles(options, fileSystem)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +62,11 @@ func Scan(options ScanOptions) ([]Directive, error) {
 	fset := token.NewFileSet()
 	var directives []Directive
 	for _, filename := range files {
-		file, err := parser.ParseFile(fset, filename, nil, parser.ParseComments|parser.AllErrors)
+		source, err := fileSystem.ReadFile(filename)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", filename, err)
+		}
+		file, err := parser.ParseFile(fset, filename, source, parser.ParseComments|parser.AllErrors)
 		if err != nil {
 			return nil, fmt.Errorf("parse %s: %w", filename, err)
 		}
@@ -77,12 +86,12 @@ func Scan(options ScanOptions) ([]Directive, error) {
 	return directives, nil
 }
 
-func absoluteDirectory(path string) (string, error) {
+func absoluteDirectory(path string, fileSystem fs.FileSystem) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
 	}
-	info, err := os.Stat(abs)
+	info, err := fileSystem.Stat(abs)
 	if err != nil {
 		return "", err
 	}
@@ -92,8 +101,8 @@ func absoluteDirectory(path string) (string, error) {
 	return abs, nil
 }
 
-func collectDirectory(dir string, files *[]string) error {
-	entries, err := os.ReadDir(dir)
+func collectDirectory(dir string, files *[]string, fileSystem fs.FileSystem) error {
+	entries, err := fileSystem.ReadDir(dir)
 	if err != nil {
 		return err
 	}
