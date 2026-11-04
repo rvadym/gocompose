@@ -25,6 +25,9 @@ type DependencyGraph struct {
 	Nodes      []GraphNode
 	Unresolved []UnresolvedDependency
 	External   []ExternalDependency
+	// Warnings describe conflicts that were resolved automatically, such as
+	// an annotated provider being overridden by a godi.yaml binding.
+	Warnings []string
 
 	// resolved carries full type fidelity (pointer-ness, import paths,
 	// already-resolved provider links) that GraphNode's display strings
@@ -171,9 +174,12 @@ type resolvedNode struct {
 	funcName string
 	wire     bool
 	provides []string
-	params   []resolvedParam
-	results  []resolvedType // 0, 1 (T), or 2 (T, error) as declared; unvalidated here.
-	inDegree int
+	// bindsInterface is set on nodes built from a Binding: the qualified
+	// interface key this constructor provides.
+	bindsInterface string
+	params         []resolvedParam
+	results        []resolvedType // 0, 1 (T), or 2 (T, error) as declared; unvalidated here.
+	inDegree       int
 
 	// assigned only during Go source generation (see generate.go):
 	varName   string
@@ -210,6 +216,7 @@ type resolvedGraph struct {
 	moduleRoot string
 	modulePath string
 	scanRoot   string // absolute scan root directory (options.Root).
+	warnings   []string
 }
 
 // BuildDependencyGraph discovers tagged functions and connects their
@@ -340,6 +347,14 @@ func resolve(options ScanOptions, fileSystem fs.FileSystem) (*resolvedGraph, err
 		}
 	}
 
+	boundNodes, err := bindingNodes(options.Bindings, interfaceTypes, rootAbs)
+	if err != nil {
+		return nil, err
+	}
+	for _, node := range boundNodes {
+		nodesByKey[node.key] = node
+	}
+
 	nodes := make([]*resolvedNode, 0, len(nodesByKey))
 	for _, node := range nodesByKey {
 		nodes = append(nodes, node)
@@ -356,11 +371,16 @@ func resolve(options ScanOptions, fileSystem fs.FileSystem) (*resolvedGraph, err
 			}
 			providers[interfacePath] = append(providers[interfacePath], node)
 		}
+		if node.bindsInterface != "" {
+			providers[node.bindsInterface] = append(providers[node.bindsInterface], node)
+		}
 		for _, result := range node.results {
 			resultKey := result.lookupKey(node.pkgPath)
 			concreteConstructors[resultKey] = append(concreteConstructors[resultKey], node)
 		}
 	}
+
+	warnings := applyBindingPrecedence(providers)
 
 	for _, node := range nodes {
 		if !node.wire {
@@ -403,6 +423,7 @@ func resolve(options ScanOptions, fileSystem fs.FileSystem) (*resolvedGraph, err
 		moduleRoot: moduleRoot,
 		modulePath: modulePath,
 		scanRoot:   rootAbs,
+		warnings:   warnings,
 	}, nil
 }
 
@@ -410,7 +431,7 @@ func resolve(options ScanOptions, fileSystem fs.FileSystem) (*resolvedGraph, err
 // string-typed DependencyGraph consumed by FormatScanOutputCLI. This is a
 // pure projection: no parsing or resolution happens here.
 func (rg *resolvedGraph) toDependencyGraph() DependencyGraph {
-	graph := DependencyGraph{resolved: rg}
+	graph := DependencyGraph{resolved: rg, Warnings: rg.warnings}
 	for _, node := range rg.nodes {
 		display := GraphNode{
 			File:     node.file,

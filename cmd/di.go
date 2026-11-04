@@ -9,6 +9,7 @@ func newDICommand() *cobra.Command {
 	}
 
 	diCmd.AddCommand(newDIGenerateCommand())
+	diCmd.AddCommand(newDIBindCommand())
 
 	return diCmd
 }
