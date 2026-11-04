@@ -21,6 +21,9 @@ type ScanOptions struct {
 	Root      string
 	WithDirs  []string
 	WithTrees []string
+	// Bindings wire constructors that cannot carry //di: annotations
+	// (typically third-party ones) to interfaces declared under Root.
+	Bindings []Binding
 }
 
 // Directive describes a //di: directive attached to a Go declaration.

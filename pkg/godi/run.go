@@ -132,11 +132,22 @@ func (r *Runner) processApp(appsPath, appName, appPath string) error {
 		appName,
 	)
 
+	compositionDir := filepath.Join(appsPath, appName, "adapters", "composition")
+	bindings, err := LoadBindings(r.fileSystem, filepath.Join(compositionDir, bindingsFileName))
+	if err != nil {
+		return fmt.Errorf("load bindings for [%s] app: %w", appName, err)
+	}
+
 	graph, err := r.BuildDependencyGraph(ScanOptions{
-		Root: appPath,
+		Root:     appPath,
+		Bindings: bindings,
 	})
 	if err != nil {
 		return fmt.Errorf("scan [%s] app: %w", appName, err)
+	}
+
+	for _, warning := range graph.Warnings {
+		r.printer.Printf("%swarning:%s %s\n", Yellow, Reset, warning)
 	}
 
 	r.printer.Print(FormatScanOutputCLI(graph))
@@ -146,7 +157,7 @@ func (r *Runner) processApp(appsPath, appName, appPath string) error {
 	}
 
 	outPath, err := r.GenerateContainer(graph, GenerateOptions{
-		OutputDir: filepath.Join(appsPath, appName, "adapters", "composition"),
+		OutputDir: compositionDir,
 	})
 	if err != nil {
 		return fmt.Errorf("generate container: %w", err)
