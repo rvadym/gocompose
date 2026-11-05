@@ -17,7 +17,7 @@ func newDIBindCommand() *cobra.Command {
 		Short: "Bind a constructor that cannot be annotated to an app interface",
 		Long: "Record a binding in the app's adapters/composition/godi.yaml.\n\n" +
 			"Both arguments use the <import/path>.<Name> notation, for example:\n" +
-			"  gocompose di bind --app catalog \\\n" +
+			"  " + nameCmd + " di bind --app catalog \\\n" +
 			"    gitlab.com/acme/app/internal/app/catalog/application/contract.CategoryReader \\\n" +
 			"    github.com/vendor/impl.NewCategoryRepo",
 		Args: cobra.ExactArgs(2),
